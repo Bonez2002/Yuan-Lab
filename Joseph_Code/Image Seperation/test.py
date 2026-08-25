@@ -38,8 +38,6 @@ import time
 import platform
 import atexit
 import re
-import os
-import subprocess
 
 import numpy as np
 import tifffile
@@ -150,16 +148,9 @@ def get_settings():
     # INPUT FOLDERS
     # ---------------------------------------------------------------
 
-    # Add every experiment root that should be processed, in run order.
-    # Each root must contain the relative group_1 and group_2 folders below.
-    # One complete Excel workbook and QC-output folder are created per root.
-    args.experiment_roots = [
-        Path(r"S:/Lab Data/Stellaris 8/Plasmid Small Molecule/2026_08_12/Raw/Split"),
-        Path(r"S:/Lab Data/Stellaris 8/Plasmid Small Molecule/2026_08_19/Raw/Split"),
-    ]
-
-    # The batch controller replaces this automatically for each root.
-    args.root = args.experiment_roots[0]
+    # If this script is inside the experiment folder, leave this line alone.
+    #args.root = Path(__file__).resolve().parent
+    args.root = Path(r"S:/Lab Data/Stellaris 8/Plasmid Small Molecule/2026_08_12/Raw/Split")
 
     # ---------------------------------------------------------------
     # ANTI-SLEEP SETTINGS
@@ -175,8 +166,8 @@ def get_settings():
     # False is recommended for long overnight analyses.
     args.keep_display_on = False
 
-    args.group1_folder = "group_1"
-    args.group2_folder = "group_2"
+    args.group1_folder = "S:/Lab Data/Stellaris 8/Plasmid Small Molecule/2026_08_12/Raw/Split/group_1"
+    args.group2_folder = "S:/Lab Data/Stellaris 8/Plasmid Small Molecule/2026_08_12/Raw/Split/group_2"
 
     # Expected matching filenames:
     # sample001_group1.tif
@@ -201,16 +192,16 @@ def get_settings():
     # OUTPUT LOCATION
     # ---------------------------------------------------------------
 
-    # Each experiment saves into this subfolder inside its own root.
-    args.output_subfolder_name = "CellposeSAM_Results"
-    args.output_folder = args.root / args.output_subfolder_name
+    # Change this to any folder you want.
+    #
+    # Windows example:
+    # args.output_folder = Path(r"D:\Microscopy\Experiment_01\Cellpose_Results")
+    #
+    # Default:
+    args.output_folder = args.root / "CellposeSAM_Results"
 
     args.output_filename = "3D_cell_intensity_results_CellposeSAM.xlsx"
     args.output = args.output_folder / args.output_filename
-
-    # When two or more roots are configured, a small batch summary is saved
-    # beside the first experiment root.
-    args.batch_summary_filename = "CellposeSAM_Batch_Summary.xlsx"
 
     # ---------------------------------------------------------------
     # CELLPOSE-SAM MODEL
@@ -341,7 +332,7 @@ def get_settings():
     #
     # If you have lots of VRAM:
     #   try 16 or 32.
-    args.batch_size = 128
+    args.batch_size = 64
 
     # Tile overlap.
     args.tile_overlap = 0.1
@@ -370,16 +361,9 @@ def get_settings():
     # NUCLEAR / CYTOSOL COMPARTMENTS
     # ---------------------------------------------------------------
     # Group 1 Cellpose objects are treated as nuclei.
-    # Choose how simulated cytosol is generated:
-    #   "until_touching" = expand throughout the image to the nearest nucleus.
-    #   "fixed_distance" = expand only the requested physical distance.
-    # In both modes, every background voxel can belong to at most one nucleus,
-    # so expansions stop at the nearest-neighbor boundary and never overlap.
-    args.cytosol_expansion_mode = "until_touching"
-
-    # Used only when cytosol_expansion_mode == "fixed_distance".
-    # Expansion distance outward from the nuclear surface, in microns.
-    args.cytosol_expansion_distance_um = 2.0
+    # True: expand every nucleus until nearest-neighbor territories meet.
+    # This creates a full 3D Voronoi-like partition of the image.
+    args.expand_cytosol_until_touching = True
 
     # IMPORTANT: change these to your microscope calibration.
     args.xy_pixel_size_um = 184.52/1024
@@ -421,106 +405,15 @@ def get_settings():
     # Every punctum candidate must also contain raw Group 2 signal at or above
     # this value. This prevents tiny numerical/noise fluctuations near zero
     # from becoming puncta. Set to 0 to disable.
-    args.puncta_min_raw_intensity = 15
+    args.puncta_min_raw_intensity = 30
 
     # Hard lower bound for the DoG threshold. This prevents the automatic
     # threshold from collapsing toward zero in nearly empty images.
     # Set to 0 to disable.
-    args.puncta_min_dog_threshold = 15
+    args.puncta_min_dog_threshold = 0.1
 
     args.puncta_min_volume_um3 = 0.05
-
-    # Detection-stage maximum volume. Components larger than this are removed
-    # from the puncta mask itself. None = no detection-stage maximum.
-    args.puncta_max_volume_um3 = 25.0
-
-    # Export-stage maximum punctum volume in um^3. A detected punctum larger
-    # than this is NOT included in Excel, per-cell puncta summaries, or counts.
-    # It can still remain visible in the puncta QC mask/overlay so you can see
-    # what was detected but rejected from quantitative export. None = disabled.
-    args.puncta_export_max_volume_um3 = 25.0
-
-    # ---------------------------------------------------------------
-    # PUNCTA 3D SHAPE FILTERING
-    # ---------------------------------------------------------------
-    # Bright connected components can be rejected when their 3D geometry is
-    # too elongated/flat to look punctum-like. Shape is calculated in physical
-    # microns, so the different Z and XY voxel sizes are accounted for.
-    args.puncta_shape_filter = True
-
-    # Maximum PCA principal-axis aspect ratio (longest / shortest).
-    # 1.0 is sphere-like; larger values are increasingly elongated/flat.
-    # None disables this individual criterion.
-    args.puncta_max_aspect_ratio = 2.00
-
-    # PCA-based 3D sphericity/isotropy score = sqrt(lambda_min/lambda_max).
-    # 1.0 is sphere-like; values approaching 0 are elongated or sheet-like.
-    # This is intentionally a voxel/PCA metric and does not require scikit-image.
-    # None disables this individual criterion.
-    args.puncta_min_shape_sphericity = 0.40
-
-    # Very tiny components do not contain enough voxels for stable 3D shape.
-    # Components below this size bypass shape rejection but still obey the
-    # normal puncta minimum-volume threshold.
-    args.puncta_shape_min_voxels = 4
-
-    # ---------------------------------------------------------------
-    # GROUP 2 DIFFUSE SIGNAL DETECTION
-    # ---------------------------------------------------------------
-    # Detect broad Group 2 signal independently of puncta. Diffuse-positive
-    # voxels must exceed a locally estimated background and are then stripped
-    # of all voxels belonging to detected puncta.
-    args.detect_group2_diffuse = True
-
-    # Gaussian scale (microns) used to estimate broad local background.
-    # This should be larger than the puncta scale.
-    args.diffuse_background_sigma_um = 2.0
-
-    # Robust threshold above the residual/background distribution.
-    args.diffuse_threshold_std = 1.5
-
-    # Hard lower limit for the automatically calculated, background-subtracted
-    # diffuse threshold. This prevents low-noise/negative-control images from
-    # producing a threshold close to zero and classifying background as signal.
-    #
-    # The effective threshold is:
-    #   max(automatic_threshold, diffuse_min_residual_threshold)
-    #
-    # This is applied to (raw Group 2 - estimated local background), not to the
-    # raw image. Tune this value using the residual/noise range in your negative
-    # controls. Set to 0 to disable the hard floor.
-    args.diffuse_min_residual_threshold = 5.0
-
-    # Optional absolute raw-intensity floor. Set to 0 to disable.
-    args.diffuse_min_raw_intensity = 5.0
-
-    # Remove very small diffuse-positive islands. Physical units are used so
-    # behavior remains consistent when voxel calibration changes.
-    args.diffuse_min_volume_um3 = 0.25
-
-    # ---------------------------------------------------------------
-    # PLASMID COMPARISON METRICS
-    # ---------------------------------------------------------------
-    # A separate "Plasmid Metrics" worksheet reports background-corrected
-    # uptake, nuclear localization, puncta organization, diffuse fractions,
-    # and punctum-to-nucleus distance summaries for every Object_ID.
-
-    # None = estimate one image-level Group 2 background value from the
-    # configured percentile. Otherwise, use this fixed raw-intensity value for
-    # every image. A fixed value is most comparable when acquisition settings
-    # and negative-control background are stable across the experiment.
-    args.plasmid_fixed_background_intensity = None
-
-    # Percentile of the raw Group 2 stack used when the fixed value is None.
-    # This preserves the TIFF's native intensity scale (0-1, uint8, uint16...).
-    args.plasmid_background_percentile = 20.0
-
-    # Reference volume used for compartment-normalized puncta density.
-    args.puncta_density_reference_um3 = 100.0
-
-    # Distance bands used for per-object punctum localization summaries.
-    args.perinuclear_distance_um = 1.0
-    args.deep_nuclear_distance_um = 1.0
+    args.puncta_max_volume_um3 = None
 
     # Split a hub at the nuclear boundary so nuclear and cytosolic portions
     # are measured separately.
@@ -1139,38 +1032,15 @@ def voxel_volume_um3(args):
     )
 
 
-def cytosol_expansion_description(args):
-    mode = str(args.cytosol_expansion_mode).strip().casefold()
-    if mode == "fixed_distance":
-        return f"Nearest nucleus up to {float(args.cytosol_expansion_distance_um):g} um"
-    return "Nearest nucleus until touching"
-
-
 def expand_nuclei(labels, args):
-    """Expand nuclei in physical 3D space without allowing overlap.
-
-    Every background voxel is first assigned to its nearest nuclear voxel.
-    In fixed-distance mode, that assignment is retained only when the voxel is
-    within the requested distance of a nucleus. This means two expanding cells
-    can meet at their nearest-neighbor boundary but can never overlap.
-    """
+    """Expand nuclei until nearest-neighbor territories touch in 3D."""
     if int(labels.max()) == 0:
         empty = np.zeros(labels.shape, dtype=np.int32)
         return empty, empty.copy()
 
-    mode = str(args.cytosol_expansion_mode).strip().casefold()
-    if mode == "fixed_distance":
-        max_distance = float(args.cytosol_expansion_distance_um)
-        print(
-            f"    Expanding nuclei by up to {max_distance:g} um "
-            "without overlapping neighboring territories..."
-        )
-    else:
-        max_distance = None
-        print("    Expanding nuclei until neighboring territories touch...")
-
+    print("    Expanding nuclei until neighboring territories touch...")
     background = labels == 0
-    distances, indices = ndi.distance_transform_edt(
+    _, indices = ndi.distance_transform_edt(
         background,
         sampling=(
             float(args.z_spacing_um),
@@ -1179,19 +1049,9 @@ def expand_nuclei(labels, args):
         ),
         return_indices=True,
     )
-
-    nearest = labels[indices[0], indices[1], indices[2]]
-
-    if max_distance is None:
-        whole = nearest.astype(np.int32, copy=True)
-    else:
-        whole = np.zeros(labels.shape, dtype=np.int32)
-        grow = background & (distances <= max_distance)
-        whole[grow] = nearest[grow]
-
-    # Preserve the original nuclear labels exactly.
+    # Each voxel inherits the Object_ID of its nearest nuclear voxel.
+    whole = labels[indices[0], indices[1], indices[2]].astype(np.int32, copy=False)
     whole[labels > 0] = labels[labels > 0]
-
     cytosol = whole.copy()
     cytosol[labels > 0] = 0
     return whole, cytosol
@@ -1294,38 +1154,6 @@ def group2_signal_qc(group2, args):
     }
 
 
-def component_shape_metrics(component_mask, z_um, xy_um):
-    """Return physical-coordinate PCA aspect ratio and isotropy/sphericity.
-
-    The metric is rotation-invariant and uses calibrated Z/Y/X coordinates.
-    Sphericity here is a PCA isotropy score, not mesh surface-area sphericity.
-    """
-    coords = np.argwhere(component_mask)
-    if coords.shape[0] < 4:
-        return np.nan, np.nan
-
-    xyz = coords.astype(np.float64, copy=False)
-    xyz[:, 0] *= float(z_um)
-    xyz[:, 1] *= float(xy_um)
-    xyz[:, 2] *= float(xy_um)
-    xyz -= np.mean(xyz, axis=0, keepdims=True)
-
-    cov = (xyz.T @ xyz) / max(1, xyz.shape[0] - 1)
-    eig = np.linalg.eigvalsh(cov)
-    eig = np.maximum(eig, 0.0)
-    largest = float(eig[-1])
-    smallest = float(eig[0])
-
-    if largest <= 0.0:
-        return np.nan, np.nan
-    if smallest <= 1e-15:
-        return np.inf, 0.0
-
-    aspect_ratio = float(np.sqrt(largest / smallest))
-    shape_sphericity = float(np.sqrt(smallest / largest))
-    return aspect_ratio, shape_sphericity
-
-
 def detect_puncta(group2, whole_labels, nucleus_labels, args):
     """
     Fast puncta pipeline: one DoG, one 3D connected-component pass, vectorized
@@ -1360,8 +1188,7 @@ def detect_puncta(group2, whole_labels, nucleus_labels, args):
             dtype=np.int32,
         )
 
-        rejected = np.zeros(group2.shape, dtype=np.uint8)
-        return empty, [], np.nan, rejected
+        return empty, [], np.nan
 
     z_um = float(args.z_spacing_um)
     xy_um = float(args.xy_pixel_size_um)
@@ -1430,71 +1257,17 @@ def detect_puncta(group2, whole_labels, nucleus_labels, args):
 
     vv = voxel_volume_um3(args)
     min_vox = max(1, int(np.ceil(float(args.puncta_min_volume_um3) / vv)))
-    # Track why candidate components are excluded so the QC overlay can show them.
-    # 1 = size/volume rejection, 2 = shape rejection, 3 = export-max-volume rejection.
-    rejected_component_reason = np.zeros(n0 + 1, dtype=np.uint8)
-
     keep = sizes >= min_vox
     keep[0] = False
-    rejected_component_reason[(np.arange(n0 + 1) != 0) & (sizes < min_vox)] = 1
     if args.puncta_max_volume_um3 is not None:
         max_vox = int(np.floor(float(args.puncta_max_volume_um3) / vv))
-        too_large_detection = sizes > max_vox
-        rejected_component_reason[too_large_detection & keep] = 1
-        keep &= ~too_large_detection
-
-    # Optional 3D physical-shape filter. This rejects broad elongated/sheet-like
-    # bright regions before they become reported puncta.
-    shape_metrics_by_component = {}
-    shape_rejected = 0
-    if bool(args.puncta_shape_filter) and np.any(keep):
-        boxes = ndi.find_objects(components)
-        min_shape_vox = max(1, int(args.puncta_shape_min_voxels))
-        for cid in np.flatnonzero(keep):
-            if cid == 0 or sizes[cid] < min_shape_vox:
-                continue
-            box = boxes[cid - 1]
-            if box is None:
-                continue
-            component_mask = components[box] == cid
-            aspect, sphericity = component_shape_metrics(
-                component_mask, z_um, xy_um
-            )
-            shape_metrics_by_component[int(cid)] = (aspect, sphericity)
-
-            reject = False
-            if args.puncta_max_aspect_ratio is not None:
-                reject |= (
-                    np.isfinite(aspect)
-                    and aspect > float(args.puncta_max_aspect_ratio)
-                )
-            if args.puncta_min_shape_sphericity is not None:
-                reject |= (
-                    np.isfinite(sphericity)
-                    and sphericity < float(args.puncta_min_shape_sphericity)
-                )
-            if reject:
-                keep[cid] = False
-                rejected_component_reason[cid] = 2
-                shape_rejected += 1
-
-        tqdm.write(
-            f"    3D shape filter rejected: {shape_rejected:,} component(s)"
-        )
+        keep &= sizes <= max_vox
 
     kept = np.flatnonzero(keep)
-    kept_shape_metrics = [
-        shape_metrics_by_component.get(int(cid), (np.nan, np.nan))
-        for cid in kept
-    ]
     lut = np.zeros(n0 + 1, dtype=np.int32)
     lut[kept] = np.arange(1, kept.size + 1, dtype=np.int32)
     puncta_labels = lut[components]
-
-    # Rejection overlay labels are categorical, not Object_ID labels.
-    rejected_labels = rejected_component_reason[components]
-
-    del components, sizes, keep, lut, rejected_component_reason
+    del components, sizes, keep, lut
     gc.collect()
 
     n = int(puncta_labels.max())
@@ -1502,7 +1275,7 @@ def detect_puncta(group2, whole_labels, nucleus_labels, args):
     tqdm.write(f"    Label + size filter: {time.perf_counter() - ts:.1f} s")
 
     if n == 0:
-        return puncta_labels, [], threshold, rejected_labels
+        return puncta_labels, [], threshold
 
     ts = time.perf_counter()
     counts = np.bincount(puncta_labels.ravel(), minlength=n + 1)
@@ -1547,22 +1320,12 @@ def detect_puncta(group2, whole_labels, nucleus_labels, args):
             compartment = "Cytosolic"
             distance = float(outside[z, y, x])
 
-        volume_um3 = float(counts[pid] * vv)
-
-        # Optional export-only upper-volume filter. This intentionally happens
-        # after detection so oversized candidates may remain visible in QC
-        # overlays while being excluded from Excel and quantitative summaries.
-        export_max = args.puncta_export_max_volume_um3
-        if export_max is not None and volume_um3 > float(export_max):
-            rejected_labels[puncta_labels == pid] = 3
-            continue
-
         records.append({
             "Punctum_ID": pid,
             "Cell_Object_ID": cell_id,
             "Compartment": compartment,
             "Voxel_Count": int(counts[pid]),
-            "Volume_um3": volume_um3,
+            "Volume_um3": float(counts[pid] * vv),
             "Mean_Intensity": float(means[pid]),
             "Max_Intensity": float(maxima[pid - 1]),
             "Integrated_Intensity": float(sums[pid]),
@@ -1573,8 +1336,6 @@ def detect_puncta(group2, whole_labels, nucleus_labels, args):
             "Centroid_Y_um": float(cy * xy_um),
             "Centroid_X_um": float(cx * xy_um),
             "Distance_From_Nuclear_Surface_um": distance,
-            "Shape_Aspect_Ratio_3D": float(kept_shape_metrics[pid - 1][0]),
-            "Shape_Sphericity_PCA_3D": float(kept_shape_metrics[pid - 1][1]),
         })
 
     del outside, inside, nuclear_mask
@@ -1582,157 +1343,8 @@ def detect_puncta(group2, whole_labels, nucleus_labels, args):
     tqdm.write(f"    Puncta measurement/assignment: {time.perf_counter() - ts:.1f} s")
     tqdm.write(f"    Final Group 2 puncta/hubs: {len(records):,}")
     tqdm.write(f"    Puncta analysis total: {time.perf_counter() - t0:.1f} s")
-    return puncta_labels, records, threshold, rejected_labels
+    return puncta_labels, records, threshold
 
-
-
-def detect_diffuse_signal(
-    group2,
-    whole_labels,
-    puncta_labels,
-    rejected_puncta_labels,
-    args,
-):
-    """Detect broad Group 2 signal while excluding only retained puncta.
-
-    A large-scale Gaussian image estimates local background. The residual
-    (raw - background) is robustly thresholded inside cell territories.
-    Puncta retained for quantitative reporting are removed before tiny diffuse
-    islands are rejected. Candidates rejected from puncta reporting remain
-    eligible for diffuse classification if they pass the diffuse criteria.
-    """
-    t0 = time.perf_counter()
-    z_um = float(args.z_spacing_um)
-    xy_um = float(args.xy_pixel_size_um)
-    sigma_um = float(args.diffuse_background_sigma_um)
-    sigma = (sigma_um / z_um, sigma_um / xy_um, sigma_um / xy_um)
-
-    tqdm.write("    Detecting diffuse Group 2 signal...")
-    raw = np.asarray(group2, dtype=np.float32)
-    background = ndi.gaussian_filter(raw, sigma=sigma, mode="nearest")
-    residual = raw - background
-
-    valid = whole_labels > 0
-    values = residual[valid]
-    if values.size == 0:
-        return np.zeros(group2.shape, dtype=np.uint8), np.nan
-
-    step = max(1, values.size // 2_000_000)
-    sample = values[::step]
-    med = float(np.median(sample))
-    mad = float(np.median(np.abs(sample - med)))
-    robust_sigma = 1.4826 * mad
-    if robust_sigma <= 0:
-        robust_sigma = float(np.std(sample))
-    automatic_threshold = (
-        med
-        + float(args.diffuse_threshold_std) * robust_sigma
-    )
-
-
-def estimate_plasmid_background(group2, args):
-    """Return one raw-intensity background estimate for a Group 2 stack.
-
-    Values are sampled for speed but are never rescaled. The returned value is
-    therefore in the same native intensity units as the TIFF and all Group 2
-    intensity measurements.
-    """
-    fixed = args.plasmid_fixed_background_intensity
-    if fixed is not None:
-        return float(fixed), "Fixed"
-
-    percentile = float(args.plasmid_background_percentile)
-    flat = np.asarray(group2).reshape(-1)
-    step = max(1, flat.size // 2_000_000)
-    sample = np.asarray(flat[::step], dtype=np.float32)
-    if sample.size == 0:
-        return 0.0, f"Percentile_{percentile:g}"
-
-    background = float(np.percentile(sample, percentile))
-    return background, f"Percentile_{percentile:g}"
-
-    # Prevent the adaptive threshold from collapsing toward zero in images
-    # containing little or no real Group 2 signal.
-    threshold_floor = float(args.diffuse_min_residual_threshold)
-    threshold = max(automatic_threshold, threshold_floor)
-
-    if threshold > automatic_threshold:
-        tqdm.write(
-            f"    Automatic diffuse threshold {automatic_threshold:.6g} "
-            f"raised to hard floor {threshold:.6g}"
-        )
-    else:
-        tqdm.write(
-            f"    Automatic diffuse threshold used: {threshold:.6g}"
-        )
-
-    diffuse = (residual > threshold) & valid
-    if float(args.diffuse_min_raw_intensity) > 0:
-        diffuse &= raw >= float(args.diffuse_min_raw_intensity)
-
-    # Remove only puncta retained for quantitative reporting. Rejection class 3
-    # marks puncta excluded by puncta_export_max_volume_um3. Those objects remain
-    # eligible for diffuse classification. Candidates rejected earlier by size
-    # or shape are already absent from puncta_labels and also remain eligible.
-    retained_puncta = puncta_labels > 0
-    if rejected_puncta_labels is not None:
-        retained_puncta &= rejected_puncta_labels != 3
-    diffuse &= ~retained_puncta
-
-    min_volume = float(args.diffuse_min_volume_um3)
-    if min_volume > 0 and np.any(diffuse):
-        cc, n = ndi.label(diffuse, structure=ndi.generate_binary_structure(3, 1))
-        sizes = np.bincount(cc.ravel(), minlength=n + 1)
-        min_vox = max(1, int(np.ceil(min_volume / voxel_volume_um3(args))))
-        keep = sizes >= min_vox
-        keep[0] = False
-        diffuse = keep[cc]
-        del cc, sizes, keep
-
-    tqdm.write(
-        f"    Diffuse threshold: {threshold:.6g}; "
-        f"positive voxels: {np.count_nonzero(diffuse):,}; "
-        f"time: {time.perf_counter() - t0:.1f} s"
-    )
-    return diffuse.astype(np.uint8, copy=False), threshold
-
-
-def diffuse_stats(diffuse_mask, region_labels, image, n_objects):
-    """Per-object diffuse statistics while preserving every original Object_ID.
-
-    ``region_stats`` normally sizes its output arrays from the maximum label that
-    remains in ``region_labels``. After masking to diffuse-positive voxels, cells
-    with no diffuse signal -- especially high-numbered Object_IDs -- may disappear.
-    This function pads every returned statistic to ``n_objects + 1`` so all
-    original Cellpose Object_IDs remain safe to index.
-    """
-    masked_labels = np.where(
-        diffuse_mask > 0, region_labels, 0
-    ).astype(np.int32, copy=False)
-
-    measured = region_stats(masked_labels, image, False)
-    target_size = int(n_objects) + 1
-
-    stats = {}
-    for key, values in measured.items():
-        values = np.asarray(values)
-
-        if key in {"count", "sum"}:
-            fill_value = 0
-        else:
-            fill_value = np.nan
-
-        padded = np.full(
-            target_size,
-            fill_value,
-            dtype=values.dtype,
-        )
-
-        copy_size = min(values.size, target_size)
-        padded[:copy_size] = values[:copy_size]
-        stats[key] = padded
-
-    return stats
 
 def puncta_summary(records, n_objects):
     out = {}
@@ -1767,51 +1379,25 @@ def make_compartment_rgb(nucleus_labels, cytosol_labels):
     return rgb
 
 
-def make_puncta_multichannel_qc(
-    group2, nucleus_labels, cytosol_labels, puncta_labels,
-    rejected_labels=None, diffuse_mask=None
-):
-    """Create a channel-separated QC stack instead of an RGB overlay.
-
-    Returns uint8 data in T,Z,C,Y,X order for a Fiji/ImageJ hyperstack.
-    T is a singleton time dimension. Fiji opens this as a Composite hyperstack
-    with independent Channel and Z sliders rather than a flat sequential stack.
-
-    Channels:
-      1 Group2_Raw_Normalized
-      2 Nucleus_Mask
-      3 Cytosol_Mask
-      4 Diffuse_Signal
-      5 Accepted_Puncta
-      6 Rejected_Size_Volume
-      7 Rejected_3D_Shape
-      8 Rejected_Export_Max_Volume
-    """
-    raw = normalize_group1_for_overlay(group2)
-    shape = group2.shape
-    channels = np.zeros((1, shape[0], 8, shape[1], shape[2]), dtype=np.uint8)
-
-    channels[0, :, 0] = raw
-    channels[0, :, 1] = (nucleus_labels > 0).astype(np.uint8) * 255
-    channels[0, :, 2] = (cytosol_labels > 0).astype(np.uint8) * 255
-
-    if diffuse_mask is not None:
-        channels[0, :, 3] = (diffuse_mask > 0).astype(np.uint8) * 255
-
-    # A punctum can remain in puncta_labels but be excluded from export by
-    # rejection class 3, so keep that class out of the accepted channel.
-    accepted = puncta_labels > 0
-    if rejected_labels is not None:
-        accepted &= rejected_labels != 3
-    channels[0, :, 4] = accepted.astype(np.uint8) * 255
-
-    if rejected_labels is not None:
-        channels[0, :, 5] = (rejected_labels == 1).astype(np.uint8) * 255
-        channels[0, :, 6] = (rejected_labels == 2).astype(np.uint8) * 255
-        channels[0, :, 7] = (rejected_labels == 3).astype(np.uint8) * 255
-
-    return channels
-
+def make_puncta_overlay(group2, nucleus_labels, cytosol_labels, puncta_labels):
+    gray = normalize_group1_for_overlay(group2)
+    rgb = np.repeat(gray[..., None], 3, axis=-1)
+    for z in range(rgb.shape[0]):
+        cyto = cytosol_labels[z] > 0
+        nuc = nucleus_labels[z] > 0
+        puncta = puncta_labels[z] > 0
+        if np.any(cyto):
+            base = rgb[z][cyto].astype(np.float32)
+            rgb[z][cyto] = np.clip(
+                0.8 * base + 0.2 * np.array([0, 180, 220]), 0, 255
+            ).astype(np.uint8)
+        if np.any(nuc):
+            base = rgb[z][nuc].astype(np.float32)
+            rgb[z][nuc] = np.clip(
+                0.8 * base + 0.2 * np.array([230, 60, 180]), 0, 255
+            ).astype(np.uint8)
+        rgb[z][puncta] = (255, 255, 0)
+    return rgb
 
 PUNCTA_HEADERS = [
     "Image",
@@ -1831,8 +1417,6 @@ PUNCTA_HEADERS = [
     "Centroid_Y_um",
     "Centroid_X_um",
     "Distance_From_Nuclear_Surface_um",
-    "Shape_Aspect_Ratio_3D",
-    "Shape_Sphericity_PCA_3D",
 ]
 
 
@@ -1951,16 +1535,6 @@ def create_workbook():
         "Cytosolic_Puncta_Mean_Intensity",
         "Cytosolic_Puncta_Max_Intensity",
         "Cytosolic_Largest_Punctum_um3",
-        "Nuclear_Diffuse_Voxel_Count", "Nuclear_Diffuse_Volume_um3",
-        "Nuclear_Diffuse_Volume_Percent", "Nuclear_Diffuse_Mean_Intensity",
-        "Nuclear_Diffuse_Total_Intensity",
-        "Cytosolic_Diffuse_Voxel_Count", "Cytosolic_Diffuse_Volume_um3",
-        "Cytosolic_Diffuse_Volume_Percent", "Cytosolic_Diffuse_Mean_Intensity",
-        "Cytosolic_Diffuse_Total_Intensity",
-        "Whole_Cell_Diffuse_Voxel_Count", "Whole_Cell_Diffuse_Volume_um3",
-        "Whole_Cell_Diffuse_Volume_Percent", "Whole_Cell_Diffuse_Mean_Intensity",
-        "Whole_Cell_Diffuse_Total_Intensity",
-        "Diffuse_Nuclear_to_Cytosol_Mean_Ratio",
         "Z_Min", "Z_Max", "Y_Min", "Y_Max", "X_Min", "X_Max",
     ])
 
@@ -1969,72 +1543,14 @@ def create_workbook():
         "Image", "Group", "Group1_File", "Group2_File", "Cellpose_Model", "Device",
         "Object_Count", "Puncta_Count", "Nuclear_Puncta_Count", "Cytosolic_Puncta_Count", "Nuclear_Puncta_Per_Object", "Cytosolic_Puncta_Per_Object", "Puncta_DoG_Threshold",
         "Group2_Zero_Percent", "Group2_Mean", "Group2_Max", "Group2_StdDev",
-        "Group2_Signal_QC", "Diffuse_Threshold",
-        "Nuclear_Diffuse_Volume_Percent_Mean",
-        "Cytosolic_Diffuse_Volume_Percent_Mean",
-        "Nuclear_Diffuse_Mean_Intensity",
-        "Cytosolic_Diffuse_Mean_Intensity",
-        "Nuclear_Diffuse_Total_Volume_um3",
-        "Cytosolic_Diffuse_Total_Volume_um3",
-        "Nuclear_Diffuse_Total_Intensity",
-        "Cytosolic_Diffuse_Total_Intensity",
-        "Diffuse_Nuclear_to_Cytosol_Ratio",
-        "Nuclear_Diffuse_Total_Volume_Percent",
-        "Whole_Cell_Diffuse_Total_Volume_Percent",
+        "Group2_Signal_QC",
         "Cytosol_Expansion_Method", "XY_Pixel_Size_um", "Z_Spacing_um", "Status",
-    ])
-
-    plasmid = wb.create_sheet("Plasmid Metrics")
-    plasmid.append([
-        "Image", "Group", "Object_ID",
-        "Background_Intensity", "Background_Method",
-        "Nucleus_Volume_um3", "Cytosol_Volume_um3", "Whole_Cell_Volume_um3",
-        "Nuclear_Raw_Total_Intensity", "Cytosolic_Raw_Total_Intensity",
-        "Whole_Cell_Raw_Total_Intensity",
-        "Nuclear_BGCorrected_Total_Intensity",
-        "Cytosolic_BGCorrected_Total_Intensity",
-        "Whole_Cell_BGCorrected_Total_Intensity",
-        "Nuclear_BGCorrected_Mean_Intensity",
-        "Cytosolic_BGCorrected_Mean_Intensity",
-        "Whole_Cell_BGCorrected_Mean_Intensity",
-        "Nuclear_Plasmid_Fraction", "Nuclear_Plasmid_Percent",
-        "Nuclear_to_Cytosol_BGCorrected_Mean_Ratio",
-        "Nuclear_Puncta_Count", "Cytosolic_Puncta_Count",
-        "Nuclear_Puncta_Per_100_um3", "Cytosolic_Puncta_Per_100_um3",
-        "Nuclear_Puncta_Total_Volume_um3", "Cytosolic_Puncta_Total_Volume_um3",
-        "Nuclear_Puncta_Median_Volume_um3", "Cytosolic_Puncta_Median_Volume_um3",
-        "Nuclear_Largest_Punctum_um3", "Cytosolic_Largest_Punctum_um3",
-        "Nuclear_Puncta_Median_BGCorrected_Integrated_Intensity",
-        "Cytosolic_Puncta_Median_BGCorrected_Integrated_Intensity",
-        "Nuclear_Brightest_Punctum_Raw_Max_Intensity",
-        "Cytosolic_Brightest_Punctum_Raw_Max_Intensity",
-        "Nuclear_Puncta_BGCorrected_Total_Intensity",
-        "Cytosolic_Puncta_BGCorrected_Total_Intensity",
-        "Nuclear_Punctate_Intensity_Fraction",
-        "Cytosolic_Punctate_Intensity_Fraction",
-        "Whole_Cell_Punctate_Intensity_Fraction",
-        "Nuclear_Diffuse_BGCorrected_Total_Intensity",
-        "Cytosolic_Diffuse_BGCorrected_Total_Intensity",
-        "Whole_Cell_Diffuse_BGCorrected_Total_Intensity",
-        "Nuclear_Diffuse_Fraction_Of_Classified_Intensity",
-        "Cytosolic_Diffuse_Fraction_Of_Classified_Intensity",
-        "Whole_Cell_Diffuse_Fraction_Of_Classified_Intensity",
-        "Nuclear_Diffuse_Volume_Percent",
-        "Whole_Cell_Diffuse_Volume_Percent",
-        "Median_Punctum_Distance_From_Nuclear_Surface_um",
-        "Puncta_Within_Distance_Band_Count",
-        "Puncta_Within_Distance_Band_Percent",
-        "Perinuclear_Cytosolic_Puncta_Count",
-        "Deep_Nuclear_Puncta_Count",
-        "Distance_Band_um",
-        "Cytosol_Expansion_Method",
     ])
 
     format_sheet_header(results)
     format_sheet_header(summary)
-    format_sheet_header(plasmid)
 
-    for ws in (results, summary, plasmid):
+    for ws in (results, summary):
         for column_cells in ws.columns:
             letter = column_cells[0].column_letter
             ws.column_dimensions[letter].width = 18
@@ -2045,151 +1561,14 @@ def create_workbook():
     summary.column_dimensions["B"].width = 16
     summary.column_dimensions["C"].width = 48
     summary.column_dimensions["D"].width = 48
-    plasmid.column_dimensions["A"].width = 42
-    plasmid.column_dimensions["B"].width = 16
 
     puncta_sheets_by_group = {}
 
-    return wb, results, puncta_sheets_by_group, summary, plasmid
-
-
-BATCH_ROOT_ENV = "CELLPOSE_SAM_BATCH_EXPERIMENT_ROOT"
-
-
-def configure_experiment_root(args, root):
-    """Apply all root-dependent paths for one experiment run."""
-    args.root = Path(root).expanduser()
-    args.output_folder = args.root / str(args.output_subfolder_name)
-    args.output = args.output_folder / str(args.output_filename)
-    return args
-
-
-def run_batch_controller(args, experiment_roots):
-    """Run configured experiment roots sequentially in isolated processes.
-
-    Process isolation ensures that GPU memory and Python allocations are fully
-    released between experiments. A failed experiment is recorded and the next
-    configured root is still attempted.
-    """
-    roots = [Path(root).expanduser() for root in experiment_roots]
-    if not roots:
-        raise ValueError("experiment_roots must contain at least one folder.")
-
-    normalized = [str(root).casefold() for root in roots]
-    if len(normalized) != len(set(normalized)):
-        raise ValueError("experiment_roots contains duplicate folders.")
-
-    print()
-    print("=" * 72)
-    print("CELLPOSE-SAM MULTI-EXPERIMENT BATCH")
-    print("=" * 72)
-    print(f"Experiment folders: {len(roots)}")
-
-    batch_wb = Workbook()
-    batch_ws = batch_wb.active
-    batch_ws.title = "Batch Summary"
-    batch_ws.append([
-        "Run_Order",
-        "Experiment_Root",
-        "Output_Workbook",
-        "Status",
-        "Return_Code",
-        "Elapsed_Minutes",
-    ])
-    format_sheet_header(batch_ws)
-    batch_ws.column_dimensions["A"].width = 12
-    batch_ws.column_dimensions["B"].width = 70
-    batch_ws.column_dimensions["C"].width = 70
-    batch_ws.column_dimensions["D"].width = 18
-    batch_ws.column_dimensions["E"].width = 14
-    batch_ws.column_dimensions["F"].width = 18
-
-    failed = 0
-    script_path = Path(__file__).resolve()
-
-    for run_order, root in enumerate(roots, start=1):
-        output_workbook = (
-            root
-            / str(args.output_subfolder_name)
-            / str(args.output_filename)
-        )
-
-        print()
-        print("=" * 72)
-        print(f"BATCH EXPERIMENT {run_order}/{len(roots)}")
-        print(f"Root: {root}")
-        print("=" * 72)
-
-        environment = os.environ.copy()
-        environment[BATCH_ROOT_ENV] = str(root)
-        start = time.perf_counter()
-
-        try:
-            completed = subprocess.run(
-                [sys.executable, str(script_path)],
-                env=environment,
-                check=False,
-            )
-            return_code = int(completed.returncode)
-            status = "OK" if return_code == 0 else "FAILED"
-        except Exception as error:
-            return_code = -1
-            status = f"LAUNCH ERROR: {error}"
-
-        elapsed_minutes = (time.perf_counter() - start) / 60.0
-        if return_code != 0:
-            failed += 1
-
-        batch_ws.append([
-            run_order,
-            str(root),
-            str(output_workbook),
-            status,
-            return_code,
-            elapsed_minutes,
-        ])
-
-        # Save after every experiment so completed-run history survives an
-        # interruption later in the batch.
-        summary_path = roots[0].parent / str(args.batch_summary_filename)
-        summary_path.parent.mkdir(parents=True, exist_ok=True)
-        batch_wb.save(summary_path)
-
-        print(
-            f"Batch experiment {run_order}/{len(roots)} finished: "
-            f"{status} ({elapsed_minutes:.2f} min)"
-        )
-
-    print()
-    print("=" * 72)
-    print("MULTI-EXPERIMENT BATCH COMPLETE")
-    print("=" * 72)
-    print(f"Experiments attempted: {len(roots)}")
-    print(f"Experiments failed: {failed}")
-    print(f"Batch summary: {summary_path}")
-
-    return 1 if failed else 0
+    return wb, results, puncta_sheets_by_group, summary
 
 
 def main():
     args = get_settings()
-
-    selected_batch_root = os.environ.get(BATCH_ROOT_ENV)
-
-    if selected_batch_root:
-        # Child process: analyze only the root selected by the controller.
-        configure_experiment_root(args, Path(selected_batch_root))
-    else:
-        experiment_roots = list(args.experiment_roots)
-
-        if not experiment_roots:
-            raise ValueError("experiment_roots must contain at least one folder.")
-
-        if len(experiment_roots) > 1:
-            return run_batch_controller(args, experiment_roots)
-
-        # A single configured experiment runs directly without spawning a child.
-        configure_experiment_root(args, experiment_roots[0])
 
     anti_sleep_enabled = False
 
@@ -2246,44 +1625,8 @@ def main():
     if float(args.xy_pixel_size_um) <= 0 or float(args.z_spacing_um) <= 0:
         raise ValueError("Physical voxel sizes must be > 0.")
 
-    expansion_mode = str(args.cytosol_expansion_mode).strip().casefold()
-    if expansion_mode not in {"until_touching", "fixed_distance"}:
-        raise ValueError(
-            'cytosol_expansion_mode must be "until_touching" or "fixed_distance".'
-        )
-    if expansion_mode == "fixed_distance" and float(args.cytosol_expansion_distance_um) <= 0:
-        raise ValueError("cytosol_expansion_distance_um must be > 0.")
-
     if float(args.puncta_sigma_small_um) <= 0:
         raise ValueError("puncta_sigma_small_um must be > 0.")
-
-    if float(args.diffuse_background_sigma_um) <= 0:
-        raise ValueError("diffuse_background_sigma_um must be > 0.")
-
-    if float(args.diffuse_threshold_std) < 0:
-        raise ValueError("diffuse_threshold_std must be >= 0.")
-
-    if float(args.diffuse_min_residual_threshold) < 0:
-        raise ValueError("diffuse_min_residual_threshold must be >= 0.")
-
-    if float(args.diffuse_min_volume_um3) < 0:
-        raise ValueError("diffuse_min_volume_um3 must be >= 0.")
-
-    if args.plasmid_fixed_background_intensity is not None:
-        if float(args.plasmid_fixed_background_intensity) < 0:
-            raise ValueError("plasmid_fixed_background_intensity must be >= 0.")
-
-    if not 0.0 <= float(args.plasmid_background_percentile) <= 100.0:
-        raise ValueError("plasmid_background_percentile must be between 0 and 100.")
-
-    if float(args.puncta_density_reference_um3) <= 0:
-        raise ValueError("puncta_density_reference_um3 must be > 0.")
-
-    if float(args.perinuclear_distance_um) < 0:
-        raise ValueError("perinuclear_distance_um must be >= 0.")
-
-    if float(args.deep_nuclear_distance_um) < 0:
-        raise ValueError("deep_nuclear_distance_um must be >= 0.")
 
     if float(args.puncta_sigma_large_um) <= float(args.puncta_sigma_small_um):
         raise ValueError(
@@ -2333,13 +1676,7 @@ def main():
     # Load model ONCE and reuse it for every image.
     model = create_cellpose_model(args)
 
-    (
-        workbook,
-        results_ws,
-        puncta_sheets_by_group,
-        summary_ws,
-        plasmid_ws,
-    ) = create_workbook()
+    workbook, results_ws, puncta_sheets_by_group, summary_ws = create_workbook()
 
     total_objects = 0
     failed_pairs = 0
@@ -2431,8 +1768,7 @@ def main():
                     args.pretrained_model, str(model.device), 0, 0, 0, 0,
                     None, None, None,
                     None, None, None, None, "NOT TESTED",
-                    None, None, None, None, None, None, None, None, None, None, None, None,
-                    cytosol_expansion_description(args),
+                    "Nearest nucleus until touching",
                     float(args.xy_pixel_size_um),
                     float(args.z_spacing_um),
                     "No objects detected",
@@ -2470,49 +1806,15 @@ def main():
             )
 
             if args.detect_group2_puncta:
-                puncta_labels, puncta_records, puncta_threshold, rejected_puncta_labels = detect_puncta(
+                puncta_labels, puncta_records, puncta_threshold = detect_puncta(
                     group2, whole_labels, labels, args
                 )
             else:
                 puncta_labels = np.zeros(labels.shape, dtype=np.int32)
                 puncta_records = []
                 puncta_threshold = np.nan
-                rejected_puncta_labels = np.zeros(labels.shape, dtype=np.uint8)
 
             ps = puncta_summary(puncta_records, object_count)
-
-            puncta_by_object = {
-                object_id: []
-                for object_id in range(1, object_count + 1)
-            }
-            for record in puncta_records:
-                object_id = int(record["Cell_Object_ID"])
-                if object_id in puncta_by_object:
-                    puncta_by_object[object_id].append(record)
-
-            plasmid_background, plasmid_background_method = (
-                estimate_plasmid_background(group2, args)
-            )
-            tqdm.write(
-                f"    Plasmid background estimate: {plasmid_background:.6g} "
-                f"({plasmid_background_method})"
-            )
-
-            if args.detect_group2_diffuse:
-                diffuse_mask, diffuse_threshold = detect_diffuse_signal(
-                    group2,
-                    whole_labels,
-                    puncta_labels,
-                    rejected_puncta_labels,
-                    args,
-                )
-                nuc_diffuse = diffuse_stats(diffuse_mask, labels, group2, object_count)
-                cyto_diffuse = diffuse_stats(diffuse_mask, cytosol_labels, group2, object_count)
-            else:
-                diffuse_mask = np.zeros(labels.shape, dtype=np.uint8)
-                diffuse_threshold = np.nan
-                nuc_diffuse = diffuse_stats(diffuse_mask, labels, group2, object_count)
-                cyto_diffuse = diffuse_stats(diffuse_mask, cytosol_labels, group2, object_count)
 
             nuclear_puncta_count = sum(
                 record["Compartment"] == "Nuclear"
@@ -2560,186 +1862,6 @@ def main():
                 npct = 100 * npun["volume"] / nv if nv > 0 else np.nan
                 cpct = 100 * cpun["volume"] / cv if cv > 0 else np.nan
 
-                # Combine the mutually exclusive nuclear and cytosolic diffuse
-                # measurements to obtain a per-Object_ID whole-cell result.
-                whole_diffuse_count = int(
-                    nuc_diffuse["count"][object_id]
-                    + cyto_diffuse["count"][object_id]
-                )
-                whole_diffuse_total = float(
-                    nuc_diffuse["sum"][object_id]
-                    + cyto_diffuse["sum"][object_id]
-                )
-                whole_diffuse_mean = (
-                    whole_diffuse_total / whole_diffuse_count
-                    if whole_diffuse_count > 0 else np.nan
-                )
-                whole_diffuse_percent = (
-                    100.0 * whole_diffuse_count / wc
-                    if wc > 0 else np.nan
-                )
-
-                # ---------------------------------------------------
-                # PER-OBJECT PLASMID COMPARISON METRICS
-                # ---------------------------------------------------
-                nuclear_raw_total = float(nuc_g2["sum"][object_id])
-                cytosolic_raw_total = float(cyto_g2["sum"][object_id])
-                whole_raw_total = nuclear_raw_total + cytosolic_raw_total
-
-                nuclear_corrected_total = max(
-                    0.0,
-                    nuclear_raw_total - plasmid_background * nc,
-                )
-                cytosolic_corrected_total = max(
-                    0.0,
-                    cytosolic_raw_total - plasmid_background * cc,
-                )
-                whole_corrected_total = (
-                    nuclear_corrected_total + cytosolic_corrected_total
-                )
-
-                nuclear_corrected_mean = (
-                    nuclear_corrected_total / nc if nc > 0 else np.nan
-                )
-                cytosolic_corrected_mean = (
-                    cytosolic_corrected_total / cc if cc > 0 else np.nan
-                )
-                whole_corrected_mean = (
-                    whole_corrected_total / wc if wc > 0 else np.nan
-                )
-
-                nuclear_plasmid_fraction = (
-                    nuclear_corrected_total / whole_corrected_total
-                    if whole_corrected_total > 0 else np.nan
-                )
-                corrected_nc_ratio = (
-                    nuclear_corrected_mean / cytosolic_corrected_mean
-                    if np.isfinite(nuclear_corrected_mean)
-                    and np.isfinite(cytosolic_corrected_mean)
-                    and cytosolic_corrected_mean > 0 else np.nan
-                )
-
-                object_puncta = puncta_by_object[object_id]
-                nuclear_records = [
-                    record for record in object_puncta
-                    if record["Compartment"] == "Nuclear"
-                ]
-                cytosolic_records = [
-                    record for record in object_puncta
-                    if record["Compartment"] == "Cytosolic"
-                ]
-
-                def puncta_metrics(records):
-                    volumes = np.asarray(
-                        [record["Volume_um3"] for record in records],
-                        dtype=np.float64,
-                    )
-                    corrected_integrated = np.asarray([
-                        max(
-                            0.0,
-                            float(record["Integrated_Intensity"])
-                            - plasmid_background * int(record["Voxel_Count"]),
-                        )
-                        for record in records
-                    ], dtype=np.float64)
-                    maxima = np.asarray(
-                        [record["Max_Intensity"] for record in records],
-                        dtype=np.float64,
-                    )
-                    return {
-                        "median_volume": (
-                            float(np.median(volumes)) if volumes.size else np.nan
-                        ),
-                        "largest_volume": (
-                            float(np.max(volumes)) if volumes.size else 0.0
-                        ),
-                        "median_corrected_integrated": (
-                            float(np.median(corrected_integrated))
-                            if corrected_integrated.size else np.nan
-                        ),
-                        "corrected_total": float(np.sum(corrected_integrated)),
-                        "brightest_raw_max": (
-                            float(np.max(maxima)) if maxima.size else np.nan
-                        ),
-                    }
-
-                nuclear_puncta_metrics = puncta_metrics(nuclear_records)
-                cytosolic_puncta_metrics = puncta_metrics(cytosolic_records)
-                nuclear_puncta_corrected = nuclear_puncta_metrics["corrected_total"]
-                cytosolic_puncta_corrected = cytosolic_puncta_metrics["corrected_total"]
-                whole_puncta_corrected = (
-                    nuclear_puncta_corrected + cytosolic_puncta_corrected
-                )
-
-                nuclear_diffuse_corrected = max(
-                    0.0,
-                    float(nuc_diffuse["sum"][object_id])
-                    - plasmid_background * int(nuc_diffuse["count"][object_id]),
-                )
-                cytosolic_diffuse_corrected = max(
-                    0.0,
-                    float(cyto_diffuse["sum"][object_id])
-                    - plasmid_background * int(cyto_diffuse["count"][object_id]),
-                )
-                whole_diffuse_corrected = (
-                    nuclear_diffuse_corrected + cytosolic_diffuse_corrected
-                )
-
-                nuclear_punctate_fraction = (
-                    nuclear_puncta_corrected / nuclear_corrected_total
-                    if nuclear_corrected_total > 0 else np.nan
-                )
-                cytosolic_punctate_fraction = (
-                    cytosolic_puncta_corrected / cytosolic_corrected_total
-                    if cytosolic_corrected_total > 0 else np.nan
-                )
-                whole_punctate_fraction = (
-                    whole_puncta_corrected / whole_corrected_total
-                    if whole_corrected_total > 0 else np.nan
-                )
-
-                def diffuse_classified_fraction(diffuse_total, puncta_total):
-                    classified_total = diffuse_total + puncta_total
-                    return (
-                        diffuse_total / classified_total
-                        if classified_total > 0 else np.nan
-                    )
-
-                nuclear_diffuse_classified_fraction = diffuse_classified_fraction(
-                    nuclear_diffuse_corrected, nuclear_puncta_corrected
-                )
-                cytosolic_diffuse_classified_fraction = diffuse_classified_fraction(
-                    cytosolic_diffuse_corrected, cytosolic_puncta_corrected
-                )
-                whole_diffuse_classified_fraction = diffuse_classified_fraction(
-                    whole_diffuse_corrected, whole_puncta_corrected
-                )
-
-                distances = np.asarray([
-                    record["Distance_From_Nuclear_Surface_um"]
-                    for record in object_puncta
-                ], dtype=np.float64)
-                distance_band = float(args.perinuclear_distance_um)
-                finite_distances = distances[np.isfinite(distances)]
-                within_band_count = int(
-                    np.count_nonzero(np.abs(finite_distances) <= distance_band)
-                )
-                within_band_percent = (
-                    100.0 * within_band_count / finite_distances.size
-                    if finite_distances.size else np.nan
-                )
-                perinuclear_cytosolic_count = int(np.count_nonzero(
-                    (finite_distances > 0)
-                    & (finite_distances <= distance_band)
-                ))
-                deep_nuclear_count = int(np.count_nonzero(
-                    finite_distances <= -float(args.deep_nuclear_distance_um)
-                ))
-                median_punctum_distance = (
-                    float(np.median(finite_distances))
-                    if finite_distances.size else np.nan
-                )
-
                 results_ws.append([
                     pair_name, group_name, object_id,
                     nc, nv, cc, cv, wc, wc * vv,
@@ -2762,90 +1884,9 @@ def main():
                     cpun["count"], cpun["volume"], cpct, cpun["total"],
                     float(np.mean(cpun["means"])) if cpun["means"] else np.nan,
                     cpun["max"], cpun["largest"],
-                    int(nuc_diffuse["count"][object_id]),
-                    float(nuc_diffuse["count"][object_id] * vv),
-                    100.0 * float(nuc_diffuse["count"][object_id]) / nc if nc > 0 else np.nan,
-                    float(nuc_diffuse["mean"][object_id]),
-                    float(nuc_diffuse["sum"][object_id]),
-                    int(cyto_diffuse["count"][object_id]),
-                    float(cyto_diffuse["count"][object_id] * vv),
-                    100.0 * float(cyto_diffuse["count"][object_id]) / cc if cc > 0 else np.nan,
-                    float(cyto_diffuse["mean"][object_id]),
-                    float(cyto_diffuse["sum"][object_id]),
-                    whole_diffuse_count,
-                    float(whole_diffuse_count * vv),
-                    float(whole_diffuse_percent),
-                    float(whole_diffuse_mean),
-                    whole_diffuse_total,
-                    (float(nuc_diffuse["mean"][object_id]) / float(cyto_diffuse["mean"][object_id])
-                     if np.isfinite(nuc_diffuse["mean"][object_id])
-                     and np.isfinite(cyto_diffuse["mean"][object_id])
-                     and float(cyto_diffuse["mean"][object_id]) != 0 else np.nan),
                     z_slice.start, z_slice.stop - 1,
                     y_slice.start, y_slice.stop - 1,
                     x_slice.start, x_slice.stop - 1,
-                ])
-
-                density_reference = float(args.puncta_density_reference_um3)
-                plasmid_ws.append([
-                    pair_name,
-                    group_name,
-                    object_id,
-                    float(plasmid_background),
-                    plasmid_background_method,
-                    float(nv),
-                    float(cv),
-                    float(wc * vv),
-                    nuclear_raw_total,
-                    cytosolic_raw_total,
-                    whole_raw_total,
-                    nuclear_corrected_total,
-                    cytosolic_corrected_total,
-                    whole_corrected_total,
-                    float(nuclear_corrected_mean),
-                    float(cytosolic_corrected_mean),
-                    float(whole_corrected_mean),
-                    float(nuclear_plasmid_fraction),
-                    (100.0 * float(nuclear_plasmid_fraction)
-                     if np.isfinite(nuclear_plasmid_fraction) else np.nan),
-                    float(corrected_nc_ratio),
-                    len(nuclear_records),
-                    len(cytosolic_records),
-                    (density_reference * len(nuclear_records) / nv
-                     if nv > 0 else np.nan),
-                    (density_reference * len(cytosolic_records) / cv
-                     if cv > 0 else np.nan),
-                    float(npun["volume"]),
-                    float(cpun["volume"]),
-                    nuclear_puncta_metrics["median_volume"],
-                    cytosolic_puncta_metrics["median_volume"],
-                    nuclear_puncta_metrics["largest_volume"],
-                    cytosolic_puncta_metrics["largest_volume"],
-                    nuclear_puncta_metrics["median_corrected_integrated"],
-                    cytosolic_puncta_metrics["median_corrected_integrated"],
-                    nuclear_puncta_metrics["brightest_raw_max"],
-                    cytosolic_puncta_metrics["brightest_raw_max"],
-                    nuclear_puncta_corrected,
-                    cytosolic_puncta_corrected,
-                    float(nuclear_punctate_fraction),
-                    float(cytosolic_punctate_fraction),
-                    float(whole_punctate_fraction),
-                    nuclear_diffuse_corrected,
-                    cytosolic_diffuse_corrected,
-                    whole_diffuse_corrected,
-                    float(nuclear_diffuse_classified_fraction),
-                    float(cytosolic_diffuse_classified_fraction),
-                    float(whole_diffuse_classified_fraction),
-                    (100.0 * float(nuc_diffuse["count"][object_id]) / nc
-                     if nc > 0 else np.nan),
-                    float(whole_diffuse_percent),
-                    float(median_punctum_distance),
-                    within_band_count,
-                    float(within_band_percent),
-                    perinuclear_cytosolic_count,
-                    deep_nuclear_count,
-                    distance_band,
-                    cytosol_expansion_description(args),
                 ])
 
             for r in puncta_records:
@@ -2874,8 +1915,6 @@ def main():
                             "Distance_From_Nuclear_Surface_um",
                             np.nan,
                         ),
-                        r.get("Shape_Aspect_Ratio_3D", np.nan),
-                        r.get("Shape_Sphericity_PCA_3D", np.nan),
                     ],
                     args.excel_rows_per_puncta_sheet,
                 )
@@ -2928,46 +1967,13 @@ def main():
                 )
 
             if args.save_puncta_overlay:
-                po = make_puncta_multichannel_qc(
-                    group2, labels, cytosol_labels, puncta_labels,
-                    rejected_puncta_labels, diffuse_mask
-                )
-                channel_names = [
-                    "Group2_Raw_Normalized",
-                    "Nucleus_Mask",
-                    "Cytosol_Mask",
-                    "Diffuse_Signal",
-                    "Accepted_Puncta",
-                    "Rejected_Size_Volume",
-                    "Rejected_3D_Shape",
-                    "Rejected_Export_Max_Volume",
-                ]
-                # Save as a Fiji/ImageJ hyperstack in Composite mode.
-                # TZCYX with singleton T is the layout tifffile expects for
-                # an ImageJ hyperstack with separate channel and Z dimensions.
-                # ImageJ metadata controls the display mode; OME metadata alone
-                # does not force Fiji to open an image as a Composite.
-                qc_path = (
-                    labels_dir
-                    / f"{pair_name}_GROUP2_PUNCTA_COMPOSITE.tif"
+                po = make_puncta_overlay(
+                    group2, labels, cytosol_labels, puncta_labels
                 )
                 tifffile.imwrite(
-                    qc_path,
-                    po,
-                    imagej=True,
-                    metadata={
-                        "axes": "TZCYX",
-                        "mode": "composite",
-                        "unit": "um",
-                        "spacing": float(args.z_spacing_um),
-                        "finterval": 0.0,
-                        "Labels": channel_names,
-                    },
-                    resolution=(
-                        1.0 / float(args.xy_pixel_size_um),
-                        1.0 / float(args.xy_pixel_size_um),
-                    ),
-                    compression=("zlib" if args.compress_output_tiffs else None),
+                    labels_dir / f"{pair_name}_GROUP2_PUNCTA_OVERLAY.tif",
+                    po, photometric="rgb",
+                    metadata={"axes": "ZYXC"}, compression=("zlib" if args.compress_output_tiffs else None),
                 )
                 del po
 
@@ -3034,64 +2040,6 @@ def main():
 
                 del colored_labels
 
-            # Image-level diffuse summaries. Volume-percent values are the
-            # mean of per-cell percentages; intensity values are pooled over
-            # all diffuse-positive voxels in the corresponding compartment.
-            object_ids = np.arange(1, object_count + 1)
-            nuc_counts_img = nuc_diffuse["count"][1:object_count + 1].astype(np.float64)
-            cyto_counts_img = cyto_diffuse["count"][1:object_count + 1].astype(np.float64)
-            nuc_region_counts = nuc_g2["count"][1:object_count + 1].astype(np.float64)
-            cyto_region_counts = cyto_g2["count"][1:object_count + 1].astype(np.float64)
-
-            nuc_diffuse_pct_cells = np.divide(
-                100.0 * nuc_counts_img, nuc_region_counts,
-                out=np.full(object_count, np.nan), where=nuc_region_counts > 0,
-            )
-            cyto_diffuse_pct_cells = np.divide(
-                100.0 * cyto_counts_img, cyto_region_counts,
-                out=np.full(object_count, np.nan), where=cyto_region_counts > 0,
-            )
-
-            nuc_diffuse_total_count = float(np.sum(nuc_counts_img))
-            cyto_diffuse_total_count = float(np.sum(cyto_counts_img))
-            nuc_diffuse_total_intensity = float(np.sum(nuc_diffuse["sum"][1:object_count + 1]))
-            cyto_diffuse_total_intensity = float(np.sum(cyto_diffuse["sum"][1:object_count + 1]))
-            nuc_diffuse_image_mean = (
-                nuc_diffuse_total_intensity / nuc_diffuse_total_count
-                if nuc_diffuse_total_count > 0 else np.nan
-            )
-            cyto_diffuse_image_mean = (
-                cyto_diffuse_total_intensity / cyto_diffuse_total_count
-                if cyto_diffuse_total_count > 0 else np.nan
-            )
-            diffuse_nc_ratio = (
-                nuc_diffuse_image_mean / cyto_diffuse_image_mean
-                if np.isfinite(nuc_diffuse_image_mean)
-                and np.isfinite(cyto_diffuse_image_mean)
-                and cyto_diffuse_image_mean != 0 else np.nan
-            )
-            # Image-level pooled volume fractions. Unlike the previous
-            # Diffuse_Positive_Cell_Percent measurement, these do not classify
-            # a cell as positive based on a single voxel. They calculate how
-            # much of the total nuclear or whole-cell volume is occupied by
-            # diffuse-positive voxels across the image.
-            total_nuclear_voxels = float(np.sum(nuc_region_counts))
-            total_whole_cell_voxels = float(
-                np.sum(nuc_region_counts + cyto_region_counts)
-            )
-            total_diffuse_voxels = float(
-                nuc_diffuse_total_count + cyto_diffuse_total_count
-            )
-
-            nuclear_diffuse_total_volume_percent = (
-                100.0 * nuc_diffuse_total_count / total_nuclear_voxels
-                if total_nuclear_voxels > 0 else np.nan
-            )
-            whole_cell_diffuse_total_volume_percent = (
-                100.0 * total_diffuse_voxels / total_whole_cell_voxels
-                if total_whole_cell_voxels > 0 else np.nan
-            )
-
             summary_ws.append([
                 pair_name, group_name, group1_path.name, group2_path.name,
                 args.pretrained_model, str(model.device), object_count,
@@ -3106,21 +2054,7 @@ def main():
                 float(group2_qc["max"]),
                 float(group2_qc["std"]),
                 "LOW SIGNAL" if group2_qc["low_signal"] else "OK",
-                float(diffuse_threshold) if np.isfinite(diffuse_threshold) else None,
-                float(np.nanmean(nuc_diffuse_pct_cells)) if np.any(np.isfinite(nuc_diffuse_pct_cells)) else None,
-                float(np.nanmean(cyto_diffuse_pct_cells)) if np.any(np.isfinite(cyto_diffuse_pct_cells)) else None,
-                float(nuc_diffuse_image_mean) if np.isfinite(nuc_diffuse_image_mean) else None,
-                float(cyto_diffuse_image_mean) if np.isfinite(cyto_diffuse_image_mean) else None,
-                float(nuc_diffuse_total_count * vv),
-                float(cyto_diffuse_total_count * vv),
-                float(nuc_diffuse_total_intensity),
-                float(cyto_diffuse_total_intensity),
-                float(diffuse_nc_ratio) if np.isfinite(diffuse_nc_ratio) else None,
-                (float(nuclear_diffuse_total_volume_percent)
-                 if np.isfinite(nuclear_diffuse_total_volume_percent) else None),
-                (float(whole_cell_diffuse_total_volume_percent)
-                 if np.isfinite(whole_cell_diffuse_total_volume_percent) else None),
-                cytosol_expansion_description(args),
+                "Nearest nucleus until touching",
                 float(args.xy_pixel_size_um),
                 float(args.z_spacing_um),
                 "OK",
@@ -3155,9 +2089,7 @@ def main():
             )
 
             del group1, group2, labels, whole_labels, cytosol_labels
-            del puncta_labels, puncta_records, rejected_puncta_labels, ps, group2_qc
-            del puncta_by_object
-            del diffuse_mask, nuc_diffuse, cyto_diffuse
+            del puncta_labels, puncta_records, ps, group2_qc
             del nuc_g1, nuc_g2, cyto_g2, whole_g2, boxes
 
             gc.collect()
@@ -3180,8 +2112,7 @@ def main():
                 args.pretrained_model, str(model.device),
                 None, None, None, None, None, None, None,
                 None, None, None, None, "ERROR",
-                None, None, None, None, None, None, None, None, None, None, None, None,
-                cytosol_expansion_description(args),
+                "Nearest nucleus until touching",
                 float(args.xy_pixel_size_um),
                 float(args.z_spacing_um),
                 f"ERROR: {error}",
@@ -3207,7 +2138,6 @@ def main():
 
     all_output_sheets = [
         results_ws,
-        plasmid_ws,
         *all_puncta_sheets,
         summary_ws,
     ]
@@ -3300,5 +2230,3 @@ if __name__ == "__main__":
             f"\nFATAL ERROR: {error}",
             file=sys.stderr,
         )
-        traceback.print_exc()
-        raise SystemExit(1)
